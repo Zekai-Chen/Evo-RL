@@ -530,8 +530,11 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                 extra_episode_metadata = (
                     {"episode_success": episode_success} if cfg.enable_episode_outcome_labeling else None
                 )
-                dataset.save_episode(extra_episode_metadata=extra_episode_metadata)
-                recorded_episodes += 1
+                if dataset.episode_buffer is not None and dataset.episode_buffer.get("size", 0) > 0:
+                    dataset.save_episode(extra_episode_metadata=extra_episode_metadata)
+                    recorded_episodes += 1
+                else:
+                    logging.warning("Skipping empty episode (no frames recorded).")
     finally:
         log_say("Stop recording", cfg.play_sounds, blocking=True)
 
