@@ -156,9 +156,9 @@ print(combined['episode_success'].value_counts())
 ```
 
 ### 2.5 Current progress
-- **186 episodes collected** (all success, all pushed to HF)
+- **222 episodes collected** (all success, all pushed to HF)
 - **Target: 300 episodes**
-- **Remaining: ~114 episodes**
+- **Remaining: ~78 episodes**
 
 ---
 
@@ -355,9 +355,12 @@ Step 9: Repeat from Step 4 with improved policy
 
 ### Camera drops / USB errors
 - Check `lsusb -t` to verify bus distribution
-- Don't put all cameras on the same USB 2.0 bus (480Mbps limit)
+- **CRITICAL**: Do NOT put both wrist cameras on the same USB 2.0 bus (480Mbps). They WILL drop within seconds. Split them across different USB buses (one on USB 2.0, one on USB 3.0 via USB-A to USB-C adapter)
+- D435 cameras MUST be on USB 3.0 (they cannot stream on USB 2.0 at all)
+- Wrist camera `/dev/video*` numbers are unstable — they change after every disconnect/reconnect. Always check before running
 - Unplug/replug cameras that time out
 - `pkill -f rerun` before each recording session
+- The `--resume=true` flag auto-continues from the last episode, so crashes don't lose data
 
 ### Motor communication errors
 - Usually transient — just retry
