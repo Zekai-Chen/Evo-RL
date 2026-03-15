@@ -79,26 +79,7 @@ def main():
 
     # Import the record function
     from lerobot.scripts.lerobot_human_inloop_record import human_inloop_record
-    from lerobot.scripts.lerobot_record import record, RecordConfig
-    from lerobot.configs import parser as cfg_parser
-    from lerobot.policies.factory import make_policy, make_pre_post_processors
-    from lerobot.datasets.lerobot_dataset import LeRobotDataset, LeRobotDatasetMetadata
-    from lerobot.datasets.utils import rename_stats
 
-    # Parse config
-    cfg = cfg_parser.parse(RecordConfig)
-
-    # Create dataset
-    import os
-    if args.fresh:
-        import shutil
-        cache_dir = os.path.expanduser(f"~/.cache/huggingface/lerobot/{args.dataset_repo}")
-        if os.path.exists(cache_dir):
-            shutil.rmtree(cache_dir)
-
-    # We need to let the normal flow create the dataset but intercept policy creation.
-    # The simplest way: just call the record function but monkey-patch make_policy.
-    from lerobot.scripts import lerobot_record
     from lerobot.policies import factory as policy_factory
 
     _original_make_policy = policy_factory.make_policy
