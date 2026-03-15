@@ -438,6 +438,26 @@ def make_policy(
     if bool(ds_meta) == bool(env_cfg):
         raise ValueError("Either one of a dataset metadata or a sim env must be provided.")
 
+    # If REMOTE_POLICY_SERVER is set, use RemotePolicy instead of loading locally
+    import os
+    remote_server = os.environ.get("REMOTE_POLICY_SERVER")
+    if remote_server:
+        from lerobot.async_inference.remote_policy import RemotePolicy, RemotePolicyConfig
+        lerobot_features = {}
+        if ds_meta is not None:
+            lerobot_features = {k: v for k, v in ds_meta.features.items() if k.startswith("observation.")}
+        remote_cfg = RemotePolicyConfig(
+            server_address=remote_server,
+            remote_policy_type=cfg.type,
+            pretrained_path=cfg.pretrained_path,
+            policy_device=os.environ.get("REMOTE_POLICY_DEVICE", "cuda"),
+            actions_per_chunk=cfg.n_action_steps if hasattr(cfg, 'n_action_steps') else 50,
+            device="cpu",
+        )
+        remote_cfg.input_features = cfg.input_features if cfg.input_features else {}
+        remote_cfg.output_features = cfg.output_features if hasattr(cfg, 'output_features') else {}
+        return RemotePolicy(remote_cfg, lerobot_features)
+
     # NOTE: Currently, if you try to run vqbet with mps backend, you'll get this error.
     # TODO(aliberts, rcadene): Implement a check_backend_compatibility in policies?
     # NotImplementedError: The operator 'aten::unique_dim' is not currently implemented for the MPS device. If

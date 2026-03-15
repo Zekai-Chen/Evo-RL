@@ -103,7 +103,9 @@ def predict_action(
     # RemotePolicy handles preprocessing/inference/postprocessing on the server
     from lerobot.async_inference.remote_policy import RemotePolicy
     if isinstance(policy, RemotePolicy):
-        action = policy.select_action(observation, task=task)
+        # Use raw robot observation stored by recording_loop (not dataset format)
+        raw_obs = policy._raw_obs if policy._raw_obs is not None else observation
+        action = policy.select_action(raw_obs, task=task)
         return action
 
     with (

@@ -16,7 +16,7 @@ import grpc
 import torch
 from torch import Tensor
 
-from lerobot.configs.policies import PreTrainedConfig
+from dataclasses import field
 from lerobot.transport import services_pb2, services_pb2_grpc  # type: ignore
 from lerobot.transport.utils import grpc_channel_options, send_bytes_in_chunks
 from lerobot.async_inference.helpers import (
@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
-class RemotePolicyConfig(PreTrainedConfig):
+class RemotePolicyConfig:
     """Config for RemotePolicy that connects to a gRPC PolicyServer."""
     type: str = "remote"
     server_address: str = "192.168.1.73:8080"
@@ -42,7 +42,8 @@ class RemotePolicyConfig(PreTrainedConfig):
     n_action_steps: int = 50
     chunk_size: int = 50
     compile_model: bool = False
-    gradient_checkpointing: bool = False
+    input_features: dict = field(default_factory=dict)
+    output_features: dict = field(default_factory=dict)
 
 
 class RemotePolicy:
@@ -59,6 +60,7 @@ class RemotePolicy:
         self._action_queue = deque()
         self._lerobot_features = lerobot_features
         self._timestep = 0
+        self._raw_obs = None  # Set by recording_loop before select_action
 
         # Connect to gRPC server
         self.channel = grpc.insecure_channel(

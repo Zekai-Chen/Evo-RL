@@ -273,6 +273,10 @@ def record_loop(
         # Get robot observation
         obs = robot.get_observation()
 
+        # Store raw observation for RemotePolicy (needs raw format, not dataset format)
+        if policy is not None and hasattr(policy, '_raw_obs'):
+            policy._raw_obs = obs
+
         # Applies a pipeline to the raw robot observation, default is IdentityProcessor
         obs_processed = robot_observation_processor(obs)
 
