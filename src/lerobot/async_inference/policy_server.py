@@ -367,9 +367,12 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
         if chunk.ndim != 3:
             chunk = chunk.unsqueeze(0)  # adding batch dimension, now shape is (B, chunk_size, action_dim)
 
-        # Store original actions for next RTC call
+        # Store leftover actions for next RTC call (skip consumed actions estimated by inference_delay)
         if self.rtc_config is not None and self.rtc_config.enabled:
-            self.rtc_prev_chunk = chunk.squeeze(0).clone()
+            delay = rtc_kwargs.get("inference_delay", 0)
+            full_chunk = chunk.squeeze(0).clone()
+            # Only keep actions that haven't been consumed during inference
+            self.rtc_prev_chunk = full_chunk[delay:] if delay < len(full_chunk) else None
 
         return chunk[:, : self.actions_per_chunk, :]
 
