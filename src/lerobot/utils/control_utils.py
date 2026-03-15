@@ -99,6 +99,13 @@ def predict_action(
         A `torch.Tensor` containing the predicted action, ready for the robot.
     """
     observation = copy(observation)
+
+    # RemotePolicy handles preprocessing/inference/postprocessing on the server
+    from lerobot.async_inference.remote_policy import RemotePolicy
+    if isinstance(policy, RemotePolicy):
+        action = policy.select_action(observation, task=task)
+        return action
+
     with (
         torch.inference_mode(),
         torch.autocast(device_type=device.type) if device.type == "cuda" and use_amp else nullcontext(),
