@@ -160,10 +160,20 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
 
         start = time.perf_counter()
         self.policy = policy_class.from_pretrained(policy_specs.pretrained_name_or_path)
-        # Disable gradient checkpointing for inference (changes vision encoder output format)
+        self.policy.eval()
+        # Disable gradient checkpointing for inference — it changes SigLIP vision
+        # encoder output from BaseModelOutputWithPooling to plain Tensor, causing
+        # 'Tensor has no attribute pooler_output' errors.
         if hasattr(self.policy, 'model') and hasattr(self.policy.model, 'gradient_checkpointing_disable'):
             self.policy.model.gradient_checkpointing_disable()
             self.logger.info("Disabled gradient checkpointing for inference")
+        # Also force-disable on the vision tower encoder directly
+        try:
+            vt = self.policy.model.paligemma_with_expert.paligemma.vision_tower.vision_model.encoder
+            vt.gradient_checkpointing = False
+            self.logger.info("Disabled vision tower encoder gradient_checkpointing")
+        except AttributeError:
+            pass
         self.policy.to(self.device)
 
         # Load preprocessor and postprocessor, overriding device to match requested device
