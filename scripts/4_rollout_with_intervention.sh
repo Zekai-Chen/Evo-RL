@@ -1,32 +1,37 @@
 #!/bin/bash
 # ============================================
-# Step 2: Collect success episodes for baseline
+# Step 4: Rollout with human intervention
 # ============================================
 # Usage:
-#   bash scripts/2_collect_success_data.sh              # Collect 50 episodes (default)
-#   bash scripts/2_collect_success_data.sh 100          # Collect 100 episodes
-#   bash scripts/2_collect_success_data.sh 50 --fresh   # Fresh start with 50 episodes
+#   bash scripts/4_rollout_with_intervention.sh              # 50 episodes (default)
+#   bash scripts/4_rollout_with_intervention.sh 100          # 100 episodes
+#   bash scripts/4_rollout_with_intervention.sh 50 --fresh   # Fresh start
 #
-# Hotkeys during recording:
+# The policy runs autonomously. Press 'i' to intervene with
+# the leader arms when the policy struggles, then 'i' again
+# to hand control back. This mixed data trains the value function.
+#
+# Hotkeys:
+#   i           -> Toggle intervention (policy <-> human)
 #   s           -> Mark SUCCESS and end current episode
 #   f           -> Mark FAILURE and end current episode
 #   Right Arrow -> End the current loop early
-#   Left Arrow  -> End early and re-record current episode
 #   Esc         -> Stop the recording session
-#
-# Tip: Only press 's' when the task is truly completed successfully.
-#      Press 'f' to discard bad episodes. Aim for high success rate data.
 
-# --- Config (EDIT THESE for your task) ---
-DATASET_REPO="Zekai-Chen/bi_so101_baseline_4cam"
+# --- Config ---
+POLICY_REPO="Zekai-Chen/pi05_fold_towel"
+DATASET_REPO="Zekai-Chen/eval_bi_so101_rollout_4cam"
 TASK="Fold the towel"
 FPS=30
-EPISODE_TIME=120
+EPISODE_TIME=180
 RESET_TIME=30
-
-# --- Argument parsing ---
-NUM_EPISODES=${1:-10}
+NUM_EPISODES=${1:-50}
 RESUME="true"
+
+# First run: create dataset locally; subsequent runs: resume
+if [ ! -d "$HOME/.cache/huggingface/lerobot/${DATASET_REPO}" ]; then
+  RESUME="false"
+fi
 
 for arg in "$@"; do
   if [ "$arg" = "--fresh" ]; then
@@ -36,16 +41,18 @@ for arg in "$@"; do
   fi
 done
 
-# Kill stale rerun window to prevent stale keypress issues
+# Kill stale rerun window
 pkill -f rerun 2>/dev/null
 sleep 1
 
-echo "=== Evo-RL Data Collection ==="
+echo "=== Evo-RL Rollout with Intervention ==="
+echo "Policy:   ${POLICY_REPO}"
 echo "Dataset:  ${DATASET_REPO}"
-echo "Task:     ${TASK}"
 echo "Episodes: ${NUM_EPISODES}"
+echo "Time/ep:  ${EPISODE_TIME}s (3 min)"
 echo "Resume:   ${RESUME}"
-echo "=============================="
+echo "========================================="
+echo "Press 'i' to intervene, 's' for success, 'f' for failure"
 
 lerobot-human-inloop-record \
   --robot.type=bi_so_follower \
@@ -64,6 +71,8 @@ lerobot-human-inloop-record \
   --dataset.episode_time_s=${EPISODE_TIME} \
   --dataset.reset_time_s=${RESET_TIME} \
   --dataset.fps=${FPS} \
-  --dataset.push_to_hub=true \
+  --dataset.push_to_hub=false \
   --resume=${RESUME} \
-  --display_data=true
+  --display_data=true \
+  --policy.path=${POLICY_REPO} \
+  --policy.compile_model=false

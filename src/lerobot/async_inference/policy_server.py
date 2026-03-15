@@ -25,6 +25,7 @@ python -m lerobot.async_inference.policy_server \
 """
 
 import logging
+import math
 import pickle  # nosec
 import threading
 import time
@@ -39,6 +40,7 @@ import grpc
 import torch
 
 from lerobot.policies.factory import get_policy_class, make_pre_post_processors
+from lerobot.policies.rtc.latency_tracker import LatencyTracker
 from lerobot.processor import (
     PolicyAction,
     PolicyProcessorPipeline,
@@ -89,6 +91,12 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
         self.policy = None
         self.preprocessor: PolicyProcessorPipeline[dict[str, Any], dict[str, Any]] | None = None
         self.postprocessor: PolicyProcessorPipeline[PolicyAction, PolicyAction] | None = None
+
+        # RTC state
+        self.rtc_config = config.rtc_config
+        self.rtc_prev_chunk: torch.Tensor | None = None
+        self.rtc_latency_tracker = LatencyTracker()
+        self.rtc_last_inference_time: float = 0.0
 
     @property
     def running(self):
@@ -165,6 +173,16 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
             },
             postprocessor_overrides={"device_processor": device_override},
         )
+
+        # Enable RTC if configured
+        if self.rtc_config is not None and self.rtc_config.enabled:
+            self.policy.config.rtc_config = self.rtc_config
+            self.policy.init_rtc_processor()
+            self.rtc_prev_chunk = None
+            self.logger.info(
+                f"RTC enabled: execution_horizon={self.rtc_config.execution_horizon}, "
+                f"max_guidance_weight={self.rtc_config.max_guidance_weight}"
+            )
 
         end = time.perf_counter()
 
@@ -322,10 +340,22 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
         ]
 
     def _get_action_chunk(self, observation: dict[str, torch.Tensor]) -> torch.Tensor:
-        """Get an action chunk from the policy. The chunk contains only"""
-        chunk = self.policy.predict_action_chunk(observation)
+        """Get an action chunk from the policy, with optional RTC."""
+        rtc_kwargs = {}
+        if self.rtc_config is not None and self.rtc_config.enabled:
+            time_per_step = 1.0 / self.config.fps
+            inference_latency = self.rtc_latency_tracker.max()
+            inference_delay = math.ceil(inference_latency / time_per_step) if inference_latency > 0 else 0
+            rtc_kwargs["inference_delay"] = inference_delay
+            rtc_kwargs["prev_chunk_left_over"] = self.rtc_prev_chunk
+
+        chunk = self.policy.predict_action_chunk(observation, **rtc_kwargs)
         if chunk.ndim != 3:
             chunk = chunk.unsqueeze(0)  # adding batch dimension, now shape is (B, chunk_size, action_dim)
+
+        # Store original actions for next RTC call
+        if self.rtc_config is not None and self.rtc_config.enabled:
+            self.rtc_prev_chunk = chunk.squeeze(0).clone()
 
         return chunk[:, : self.actions_per_chunk, :]
 
@@ -358,6 +388,11 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
         start_inference = time.perf_counter()
         action_tensor = self._get_action_chunk(observation)
         inference_time = time.perf_counter() - start_inference
+
+        # Track latency for RTC inference_delay calculation
+        if self.rtc_config is not None and self.rtc_config.enabled:
+            self.rtc_latency_tracker.add(time.perf_counter() - start_prepare)
+
         self.logger.info(
             f"Preprocessing and inference took {inference_time:.4f}s, action shape: {action_tensor.shape}"
         )

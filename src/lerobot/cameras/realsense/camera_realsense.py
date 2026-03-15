@@ -172,34 +172,58 @@ class RealSenseCamera(Camera):
             RuntimeError: If the pipeline starts but fails to apply requested settings.
         """
 
-        self.rs_pipeline = rs.pipeline()
-        rs_config = rs.config()
-        self._configure_rs_pipeline_config(rs_config)
+        max_retries = 3
+        for attempt in range(max_retries):
+            self.rs_pipeline = rs.pipeline()
+            rs_config = rs.config()
+            self._configure_rs_pipeline_config(rs_config)
 
-        try:
-            self.rs_profile = self.rs_pipeline.start(rs_config)
-        except RuntimeError as e:
-            self.rs_profile = None
-            self.rs_pipeline = None
-            raise ConnectionError(
-                f"Failed to open {self}.Run `lerobot-find-cameras realsense` to find available cameras."
-            ) from e
+            try:
+                self.rs_profile = self.rs_pipeline.start(rs_config)
+            except RuntimeError as e:
+                self.rs_profile = None
+                self.rs_pipeline = None
+                if attempt < max_retries - 1:
+                    logger.warning(f"{self} pipeline start failed (attempt {attempt + 1}/{max_retries}), retrying in 3s...")
+                    time.sleep(3)
+                    continue
+                raise ConnectionError(
+                    f"Failed to open {self}.Run `lerobot-find-cameras realsense` to find available cameras."
+                ) from e
 
-        self._configure_capture_settings()
-        self._start_read_thread()
+            self._configure_capture_settings()
+            self._start_read_thread()
 
-        # NOTE(Steven/Caroline): Enforcing at least one second of warmup as RS cameras need a bit of time before the first read. If we don't wait, the first read from the warmup will raise.
-        self.warmup_s = max(self.warmup_s, 1)
+            # NOTE(Steven/Caroline): Enforcing at least one second of warmup as RS cameras need a bit of time before the first read. If we don't wait, the first read from the warmup will raise.
+            warmup_s = max(self.warmup_s, 1)
 
-        start_time = time.time()
-        while time.time() - start_time < self.warmup_s:
-            self.async_read(timeout_ms=self.warmup_s * 1000)
-            time.sleep(0.1)
-        with self.frame_lock:
-            if self.latest_color_frame is None or self.use_depth and self.latest_depth_frame is None:
-                raise ConnectionError(f"{self} failed to capture frames during warmup.")
+            try:
+                start_time = time.time()
+                while time.time() - start_time < warmup_s:
+                    self.async_read(timeout_ms=warmup_s * 1000)
+                    time.sleep(0.1)
+                with self.frame_lock:
+                    if self.latest_color_frame is None or self.use_depth and self.latest_depth_frame is None:
+                        raise ConnectionError(f"{self} failed to capture frames during warmup.")
+            except (TimeoutError, ConnectionError, RuntimeError) as e:
+                logger.warning(f"{self} warmup failed (attempt {attempt + 1}/{max_retries}): {e}")
+                # Clean up before retry
+                self._stop_read_thread()
+                if self.rs_pipeline is not None:
+                    try:
+                        self.rs_pipeline.stop()
+                    except Exception:
+                        pass
+                    self.rs_pipeline = None
+                    self.rs_profile = None
+                if attempt < max_retries - 1:
+                    logger.warning(f"{self} retrying in 5s...")
+                    time.sleep(5)
+                    continue
+                raise
 
-        logger.info(f"{self} connected.")
+            logger.info(f"{self} connected.")
+            break
 
     @staticmethod
     def find_cameras() -> list[dict[str, Any]]:
@@ -517,10 +541,14 @@ class RealSenseCamera(Camera):
             self.stop_event.set()
 
         if self.thread is not None and self.thread.is_alive():
-            self.thread.join(timeout=2.0)
+            self.thread.join(timeout=5.0)
+
+        # Only clear stop_event after thread has fully stopped to avoid
+        # AttributeError in _read_loop when it checks stop_event.is_set()
+        if self.thread is None or not self.thread.is_alive():
+            self.stop_event = None
 
         self.thread = None
-        self.stop_event = None
 
         with self.frame_lock:
             self.latest_color_frame = None

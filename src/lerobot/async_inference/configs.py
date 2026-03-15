@@ -17,6 +17,8 @@ from dataclasses import dataclass, field
 
 import torch
 
+from lerobot.configs.types import RTCAttentionSchedule
+from lerobot.policies.rtc.configuration_rtc import RTCConfig
 from lerobot.robots.config import RobotConfig
 
 from .constants import (
@@ -62,6 +64,11 @@ class PolicyServerConfig:
 
     obs_queue_timeout: float = field(
         default=DEFAULT_OBS_QUEUE_TIMEOUT, metadata={"help": "Timeout for observation queue in seconds"}
+    )
+
+    # RTC configuration
+    rtc_config: RTCConfig | None = field(
+        default=None, metadata={"help": "RTC config. Pass --rtc_config.enabled=true to enable."}
     )
 
     def __post_init__(self):
