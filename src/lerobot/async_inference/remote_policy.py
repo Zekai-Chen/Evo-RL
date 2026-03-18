@@ -81,7 +81,7 @@ class RemotePolicy:
 
         # How many actions left before requesting new chunk
         # Should be >= execution_horizon so RTC has enough overlap
-        self._refill_threshold = 20
+        self._refill_threshold = 10
 
         # Connect to gRPC server
         self.channel = grpc.insecure_channel(
@@ -208,8 +208,6 @@ class RemotePolicy:
                 raw_obs = dict(obs)
                 if task is not None:
                     raw_obs["task"] = task
-                # Tell server how many actions remain so it can compute correct RTC offset
-                raw_obs["__rtc_queue_remaining__"] = self._action_queue.qsize()
 
                 timed_obs = TimedObservation(
                     timestamp=time.time(),
