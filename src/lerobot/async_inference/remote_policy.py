@@ -66,8 +66,6 @@ class RemotePolicy:
         self._raw_obs = None  # Set by recording_loop before select_action
         self._task = None
         self._timestep = 0
-        self._needs_fresh_obs = True  # Discard stale actions after reset
-
         # ActionQueue for RTC-compatible action buffering
         rtc_config = RTCConfig(enabled=True, execution_horizon=10, max_guidance_weight=10.0)
         self._action_queue = ActionQueue(rtc_config)
@@ -125,7 +123,6 @@ class RemotePolicy:
             self._first_actions_ready.clear()
             self._latency_tracker.reset()
             self._new_obs_event.clear()  # Stop background thread from requesting
-            self._needs_fresh_obs = True  # Flag to discard stale actions on next select_action
 
     def select_action(self, observation: dict, task: str | None = None) -> torch.Tensor:
         """Get next action from the queue. Non-blocking after first chunk.
@@ -133,15 +130,6 @@ class RemotePolicy:
         Called by the recording loop on every frame. Stores the latest observation
         for the background thread to use when requesting the next chunk.
         """
-        # After reset, discard any stale actions that the background thread may have queued
-        if self._needs_fresh_obs:
-            with self._lock:
-                self._action_queue = ActionQueue(
-                    RTCConfig(enabled=True, execution_horizon=10, max_guidance_weight=10.0)
-                )
-                self._first_actions_ready.clear()
-            self._needs_fresh_obs = False
-
         # Store latest observation for background thread
         with self._lock:
             self._raw_obs = observation
