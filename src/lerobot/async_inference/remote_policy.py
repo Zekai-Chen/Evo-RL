@@ -204,13 +204,10 @@ class RemotePolicy:
                 prev_actions = self._action_queue.get_left_over()
                 action_index_before = self._action_queue.get_action_index()
 
-                # Build observation for server, include RTC leftover
+                # Build observation for server
                 raw_obs = dict(obs)
                 if task is not None:
                     raw_obs["task"] = task
-                # Attach client's leftover actions so server can use as prev_chunk_left_over
-                if prev_actions is not None:
-                    raw_obs["__rtc_prev_chunk_left_over__"] = prev_actions.cpu().numpy()
 
                 timed_obs = TimedObservation(
                     timestamp=time.time(),
