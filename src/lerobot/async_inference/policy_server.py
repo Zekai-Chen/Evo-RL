@@ -387,8 +387,19 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
         """
         """1. Prepare observation"""
         start_prepare = time.perf_counter()
+        raw_obs = observation_t.get_observation()
+
+        # Decompress JPEG-encoded images from client
+        import cv2
+        import numpy as np
+        for k, v in list(raw_obs.items()):
+            if isinstance(v, tuple) and len(v) == 2 and v[0] == "__jpeg__":
+                raw_obs[k] = cv2.imdecode(
+                    np.frombuffer(v[1], dtype=np.uint8), cv2.IMREAD_COLOR
+                )
+
         observation: Observation = raw_observation_to_observation(
-            observation_t.get_observation(),
+            raw_obs,
             self.lerobot_features,
             self.policy_image_features,
         )
