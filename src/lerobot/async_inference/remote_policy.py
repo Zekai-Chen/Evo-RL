@@ -208,6 +208,8 @@ class RemotePolicy:
                 raw_obs = dict(obs)
                 if task is not None:
                     raw_obs["task"] = task
+                # Tell server how many actions remain so it can compute correct RTC offset
+                raw_obs["__rtc_queue_remaining__"] = self._action_queue.qsize()
 
                 timed_obs = TimedObservation(
                     timestamp=time.time(),
