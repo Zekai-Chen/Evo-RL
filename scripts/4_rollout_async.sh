@@ -21,6 +21,7 @@
 # --- Config ---
 export REMOTE_POLICY_SERVER="192.168.1.73:8080"
 export REMOTE_POLICY_DEVICE="cuda"
+export REMOTE_ACTIONS_PER_CHUNK=50
 
 POLICY_REPO="Zekai-Chen/pi05_fold_towel"
 DATASET_REPO="Zekai-Chen/eval_bi_so101_rollout_4cam"

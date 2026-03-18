@@ -451,7 +451,7 @@ def make_policy(
             remote_policy_type=cfg.type,
             pretrained_path=cfg.pretrained_path,
             policy_device=os.environ.get("REMOTE_POLICY_DEVICE", "cuda"),
-            actions_per_chunk=cfg.n_action_steps if hasattr(cfg, 'n_action_steps') else 50,
+            actions_per_chunk=int(os.environ.get("REMOTE_ACTIONS_PER_CHUNK", cfg.n_action_steps if hasattr(cfg, 'n_action_steps') else 50)),
             device="cpu",
         )
         remote_cfg.input_features = cfg.input_features if cfg.input_features else {}

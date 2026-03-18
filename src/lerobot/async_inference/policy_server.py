@@ -353,26 +353,28 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
             for i, action in enumerate(action_chunk)
         ]
 
-    def _get_action_chunk(self, observation: dict[str, torch.Tensor]) -> torch.Tensor:
-        """Get an action chunk from the policy, with optional RTC."""
+    def _get_action_chunk(self, observation: dict[str, torch.Tensor],
+                          client_prev_chunk: torch.Tensor | None = None) -> torch.Tensor:
+        """Get an action chunk from the policy, with optional RTC.
+
+        Args:
+            observation: preprocessed observation for the policy
+            client_prev_chunk: prev_chunk_left_over from the client's ActionQueue,
+                sent via __rtc_prev_chunk_left_over__ in the observation dict.
+                This is the ground truth of what actions remain unconsumed.
+        """
         rtc_kwargs = {}
         if self.rtc_config is not None and self.rtc_config.enabled:
             time_per_step = 1.0 / self.config.fps
             inference_latency = self.rtc_latency_tracker.max()
             inference_delay = math.ceil(inference_latency / time_per_step) if inference_latency > 0 else 0
             rtc_kwargs["inference_delay"] = inference_delay
-            rtc_kwargs["prev_chunk_left_over"] = self.rtc_prev_chunk
+            # Use client's leftover (ground truth) instead of server's estimate
+            rtc_kwargs["prev_chunk_left_over"] = client_prev_chunk
 
         chunk = self.policy.predict_action_chunk(observation, **rtc_kwargs)
         if chunk.ndim != 3:
             chunk = chunk.unsqueeze(0)  # adding batch dimension, now shape is (B, chunk_size, action_dim)
-
-        # Store leftover actions for next RTC call (skip consumed actions estimated by inference_delay)
-        if self.rtc_config is not None and self.rtc_config.enabled:
-            delay = rtc_kwargs.get("inference_delay", 0)
-            full_chunk = chunk.squeeze(0).clone()
-            # Only keep actions that haven't been consumed during inference
-            self.rtc_prev_chunk = full_chunk[delay:] if delay < len(full_chunk) else None
 
         return chunk[:, : self.actions_per_chunk, :]
 
@@ -388,8 +390,18 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
         """
         """1. Prepare observation"""
         start_prepare = time.perf_counter()
+        raw_obs = observation_t.get_observation()
+
+        # Extract client's RTC leftover if present
+        client_prev_chunk = None
+        if "__rtc_prev_chunk_left_over__" in raw_obs:
+            import numpy as np
+            leftover_np = raw_obs.pop("__rtc_prev_chunk_left_over__")
+            client_prev_chunk = torch.from_numpy(leftover_np).to(self.device)
+            self.logger.debug(f"Received client RTC leftover: {client_prev_chunk.shape}")
+
         observation: Observation = raw_observation_to_observation(
-            observation_t.get_observation(),
+            raw_obs,
             self.lerobot_features,
             self.policy_image_features,
         )
@@ -403,7 +415,7 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
 
         """3. Get action chunk"""
         start_inference = time.perf_counter()
-        action_tensor = self._get_action_chunk(observation)
+        action_tensor = self._get_action_chunk(observation, client_prev_chunk=client_prev_chunk)
         inference_time = time.perf_counter() - start_inference
 
         # Track latency for RTC inference_delay calculation
