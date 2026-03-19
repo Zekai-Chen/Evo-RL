@@ -21,7 +21,7 @@
 # --- Config ---
 export REMOTE_POLICY_SERVER="192.168.1.73:8080"
 export REMOTE_POLICY_DEVICE="cuda"
-export REMOTE_ACTIONS_PER_CHUNK=30
+export REMOTE_ACTIONS_PER_CHUNK=25
 
 POLICY_REPO="Zekai-Chen/pi05_fold_towel"
 DATASET_REPO="Zekai-Chen/eval_bi_so101_rollout_4cam"
@@ -29,7 +29,7 @@ TASK="Fold the towel"
 FPS=30
 EPISODE_TIME=180
 RESET_TIME=30
-NUM_EPISODES=50
+NUM_EPISODES=10
 RESUME="true"
 
 # First run: create dataset locally; subsequent runs: resume

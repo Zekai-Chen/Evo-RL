@@ -1,12 +1,16 @@
 """
-RemotePolicy: async gRPC wrapper with ActionQueue for RTC-compatible inference.
+RemotePolicy: async gRPC wrapper with proper RTC support.
 
-Uses a background thread for inference so the recording loop never blocks.
-Actions are consumed from an ActionQueue while the next chunk is being computed.
-RTC prev_chunk_left_over is properly tracked via ActionQueue.get_left_over().
+Following eval_with_real_robot.py reference:
+- Background thread handles inference
+- ActionQueue stores ORIGINAL (normalized) and POSTPROCESSED actions separately
+- get_left_over() returns originals → sent to server as prev_chunk_left_over
+- Server returns both original + postprocessed → client merges both into ActionQueue
+- On intervention release / episode end: reset_rtc flag clears server RTC state
 """
 
 import logging
+import math
 import pickle  # nosec
 import threading
 import time
@@ -33,7 +37,6 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class RemotePolicyConfig:
-    """Config for RemotePolicy that connects to a gRPC PolicyServer."""
     type: str = "remote"
     server_address: str = "192.168.1.73:8080"
     remote_policy_type: str = "pi05"
@@ -50,53 +53,41 @@ class RemotePolicyConfig:
 
 
 class RemotePolicy:
-    """Async policy that forwards inference to a remote gRPC PolicyServer.
-
-    Uses a background inference thread and ActionQueue for smooth action execution.
-    Compatible with RTC when the server has RTC enabled.
-
-    The recording loop calls select_action() which returns immediately from the
-    ActionQueue. A background thread continuously requests new action chunks
-    before the queue runs out, passing prev_chunk_left_over for RTC continuity.
-    """
-
     name = "remote"
 
     def __init__(self, config: RemotePolicyConfig, lerobot_features: dict):
         self.config = config
         self._lerobot_features = lerobot_features
-        self._raw_obs = None  # Set by recording_loop before select_action
+        self._raw_obs = None
         self._task = None
         self._timestep = 0
-        self._reset_rtc = False
-        # ActionQueue for RTC-compatible action buffering
-        rtc_config = RTCConfig(enabled=True, execution_horizon=10, max_guidance_weight=10.0)
-        self._action_queue = ActionQueue(rtc_config)
+        self._reset_rtc = True  # First chunk has no RTC history
+
+        # RTC config — must match server
+        self._rtc_config = RTCConfig(enabled=True, execution_horizon=10, max_guidance_weight=10.0)
+        self._action_queue = ActionQueue(self._rtc_config)
         self._latency_tracker = LatencyTracker()
 
-        # Thread synchronization
+        # Reference: action_queue_size_to_get_new_actions should be > execution_horizon + inference_delay
+        self._refill_threshold = 30
+
+        # Threading
         self._lock = threading.Lock()
         self._new_obs_event = threading.Event()
         self._shutdown = threading.Event()
         self._first_actions_ready = threading.Event()
 
-        # How many actions left before requesting new chunk
-        # Should be >= execution_horizon so RTC has enough overlap
-        self._refill_threshold = 10
-
-        # Connect to gRPC server
+        # gRPC
         self.channel = grpc.insecure_channel(
             config.server_address,
             grpc_channel_options(initial_backoff="0.033s"),
         )
         self.stub = services_pb2_grpc.AsyncInferenceStub(self.channel)
 
-        # Handshake
         logger.info(f"Connecting to policy server at {config.server_address}...")
         self.stub.Ready(services_pb2.Empty())
         logger.info("Connected. Sending policy instructions...")
 
-        # Send policy instructions — server loads the model
         policy_specs = _RemotePolicyConfig(
             policy_type=config.remote_policy_type,
             pretrained_name_or_path=config.pretrained_path,
@@ -109,55 +100,39 @@ class RemotePolicy:
         )
         logger.info("Policy loading on server (this may take a minute)...")
 
-        # Start background inference thread
         self._inference_thread = threading.Thread(
             target=self._inference_loop, daemon=True, name="RemotePolicy-Inference"
         )
         self._inference_thread.start()
 
     def reset(self):
-        """Reset action queue and server RTC state (called on episode end and intervention release)."""
+        """Called on episode end and intervention release."""
         with self._lock:
-            self._action_queue = ActionQueue(
-                RTCConfig(enabled=True, execution_horizon=10, max_guidance_weight=10.0)
-            )
+            self._action_queue = ActionQueue(self._rtc_config)
             self._timestep = 0
-            self._raw_obs = None  # Prevent background thread from using stale observation
+            self._raw_obs = None
             self._first_actions_ready.clear()
             self._latency_tracker.reset()
-            self._new_obs_event.clear()  # Stop background thread from requesting
-
-        # Signal to clear server's RTC prev_chunk on next inference
+            self._new_obs_event.clear()
         self._reset_rtc = True
 
     def select_action(self, observation: dict, task: str | None = None) -> torch.Tensor:
-        """Get next action from the queue. Non-blocking after first chunk.
-
-        Called by the recording loop on every frame. Stores the latest observation
-        for the background thread to use when requesting the next chunk.
-        """
-        # Store latest observation for background thread
         with self._lock:
             self._raw_obs = observation
             self._task = task
-
-        # Signal background thread that new observation is available
         self._new_obs_event.set()
 
-        # Wait for first actions (only blocks on very first call)
         if not self._first_actions_ready.is_set():
             self._first_actions_ready.wait(timeout=60.0)
 
-        # Get action from queue
+        # ActionQueue.get() returns POSTPROCESSED action
         action = self._action_queue.get()
         if action is not None:
             return action.unsqueeze(0) if action.ndim == 1 else action
 
-        # Queue empty — this means inference is slower than execution.
-        # Block and wait for next chunk.
         logger.warning("Action queue empty, waiting for inference...")
-        self._new_obs_event.set()  # Ensure inference thread is working
-        for _ in range(100):  # Wait up to 10 seconds
+        self._new_obs_event.set()
+        for _ in range(100):
             time.sleep(0.1)
             action = self._action_queue.get()
             if action is not None:
@@ -167,21 +142,17 @@ class RemotePolicy:
         return torch.zeros(1, 12)
 
     def _inference_loop(self):
-        """Background thread: continuously requests new action chunks."""
-        logger.info("[INFERENCE] Background inference thread started")
+        """Background thread following eval_with_real_robot.py pattern."""
+        logger.info("[INFERENCE] Background thread started")
 
         while not self._shutdown.is_set():
-            # Wait until we have an observation and queue needs refill
             self._new_obs_event.wait(timeout=1.0)
 
             queue_size = self._action_queue.qsize()
-
-            # Only request new chunk if queue is running low
             if queue_size > self._refill_threshold and self._first_actions_ready.is_set():
-                time.sleep(0.01)  # Don't busy-wait
+                time.sleep(0.01)
                 continue
 
-            # Get current observation
             with self._lock:
                 obs = self._raw_obs
                 task = self._task
@@ -192,13 +163,14 @@ class RemotePolicy:
             self._new_obs_event.clear()
 
             try:
-                start_time = time.perf_counter()
+                current_time = time.perf_counter()
 
-                # Get leftover actions for RTC
-                prev_actions = self._action_queue.get_left_over()
+                # Following reference: get state BEFORE inference
                 action_index_before = self._action_queue.get_action_index()
+                # get_left_over returns ORIGINAL (normalized) actions
+                prev_actions = self._action_queue.get_left_over()
 
-                # Build observation for server, JPEG-compress images
+                # Build observation with JPEG compression
                 raw_obs = {}
                 for k, v in obs.items():
                     if isinstance(v, np.ndarray) and v.ndim == 3 and v.shape[2] == 3:
@@ -208,6 +180,11 @@ class RemotePolicy:
                         raw_obs[k] = v
                 if task is not None:
                     raw_obs["task"] = task
+
+                # Send client's RTC leftover (original/normalized) to server
+                if prev_actions is not None and not self._reset_rtc:
+                    raw_obs["__rtc_prev_chunk_left_over__"] = prev_actions.cpu().numpy()
+
                 if self._reset_rtc:
                     raw_obs["__reset_rtc__"] = True
                     self._reset_rtc = False
@@ -219,51 +196,51 @@ class RemotePolicy:
                 )
                 timed_obs.must_go = True
 
-                # Send observation to server
                 obs_bytes = pickle.dumps(timed_obs)
-                obs_iterator = send_bytes_in_chunks(
-                    obs_bytes,
-                    services_pb2.Observation,
-                    log_prefix="[INFERENCE] Obs",
-                    silent=True,
+                obs_iter = send_bytes_in_chunks(
+                    obs_bytes, services_pb2.Observation,
+                    log_prefix="[INFERENCE] Obs", silent=True,
                 )
-                self.stub.SendObservations(obs_iterator)
+                self.stub.SendObservations(obs_iter)
 
-                # Get action chunk from server (blocks until inference done)
-                actions_response = self.stub.GetActions(services_pb2.Empty())
-
-                if len(actions_response.data) == 0:
+                resp = self.stub.GetActions(services_pb2.Empty())
+                if len(resp.data) == 0:
                     logger.warning("[INFERENCE] Server returned empty actions")
                     continue
 
-                timed_actions: list[TimedAction] = pickle.loads(actions_response.data)  # nosec
+                server_result = pickle.loads(resp.data)  # nosec
 
-                if not timed_actions:
-                    continue
+                # Server returns dict with original (normalized) + postprocessed
+                if isinstance(server_result, dict):
+                    original_actions = torch.from_numpy(server_result["original"]).float()
+                    postprocessed_actions = torch.from_numpy(server_result["postprocessed"]).float()
+                else:
+                    # Fallback for old server format (list[TimedAction])
+                    postprocessed_actions = torch.stack(
+                        [ta.get_action().cpu() for ta in server_result]
+                    )
+                    original_actions = postprocessed_actions.clone()
 
-                # Extract action tensors
-                action_tensors = torch.stack([ta.get_action().cpu() for ta in timed_actions])
+                # Following reference: calculate delay and merge
+                new_latency = time.perf_counter() - current_time
+                time_per_step = 1.0 / 30
+                new_delay = math.ceil(new_latency / time_per_step)
+                self._latency_tracker.add(new_latency)
 
-                # Calculate real inference delay
-                inference_time = time.perf_counter() - start_time
-                self._latency_tracker.add(inference_time)
-                time_per_step = 1.0 / 30  # fps
-                real_delay = max(0, int(inference_time / time_per_step))
-
-                # Merge into ActionQueue with RTC tracking
+                # Merge: ORIGINAL for RTC tracking, POSTPROCESSED for execution
                 self._action_queue.merge(
-                    action_tensors,       # original actions (for RTC left_over)
-                    action_tensors,       # processed actions (for execution)
-                    real_delay,
+                    original_actions,       # stored in original_queue, returned by get_left_over()
+                    postprocessed_actions,   # stored in queue, returned by get()
+                    new_delay,
                     action_index_before,
                 )
 
-                self._timestep += len(timed_actions)
+                self._timestep += len(postprocessed_actions)
                 self._first_actions_ready.set()
 
                 logger.debug(
-                    f"[INFERENCE] Chunk received: {len(timed_actions)} actions, "
-                    f"inference={inference_time:.3f}s, delay={real_delay}, "
+                    f"[INFERENCE] Chunk: {len(postprocessed_actions)} actions, "
+                    f"latency={new_latency:.3f}s, delay={new_delay}, "
                     f"queue={self._action_queue.qsize()}"
                 )
 
@@ -272,10 +249,10 @@ class RemotePolicy:
                 import traceback
                 traceback.print_exc()
 
-        logger.info("[INFERENCE] Background inference thread stopped")
+        logger.info("[INFERENCE] Background thread stopped")
 
     def forward(self, *args, **kwargs):
-        raise NotImplementedError("RemotePolicy does not support forward()")
+        raise NotImplementedError
 
     def __del__(self):
         self._shutdown.set()
