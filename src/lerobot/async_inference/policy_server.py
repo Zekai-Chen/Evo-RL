@@ -389,6 +389,12 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
         start_prepare = time.perf_counter()
         raw_obs = observation_t.get_observation()
 
+        # Check if client requests RTC reset (after intervention or episode change)
+        if raw_obs.pop("__reset_rtc__", False):
+            self.rtc_prev_chunk = None
+            self.rtc_latency_tracker.reset()
+            self.logger.info("RTC state reset (intervention release or new episode)")
+
         # Decompress JPEG-encoded images from client
         import cv2
         import numpy as np

@@ -68,6 +68,7 @@ class RemotePolicy:
         self._raw_obs = None  # Set by recording_loop before select_action
         self._task = None
         self._timestep = 0
+        self._reset_rtc = False
         # ActionQueue for RTC-compatible action buffering
         rtc_config = RTCConfig(enabled=True, execution_horizon=10, max_guidance_weight=10.0)
         self._action_queue = ActionQueue(rtc_config)
@@ -115,7 +116,7 @@ class RemotePolicy:
         self._inference_thread.start()
 
     def reset(self):
-        """Reset action queue between episodes."""
+        """Reset action queue and server RTC state (called on episode end and intervention release)."""
         with self._lock:
             self._action_queue = ActionQueue(
                 RTCConfig(enabled=True, execution_horizon=10, max_guidance_weight=10.0)
@@ -125,6 +126,9 @@ class RemotePolicy:
             self._first_actions_ready.clear()
             self._latency_tracker.reset()
             self._new_obs_event.clear()  # Stop background thread from requesting
+
+        # Signal to clear server's RTC prev_chunk on next inference
+        self._reset_rtc = True
 
     def select_action(self, observation: dict, task: str | None = None) -> torch.Tensor:
         """Get next action from the queue. Non-blocking after first chunk.
@@ -204,6 +208,9 @@ class RemotePolicy:
                         raw_obs[k] = v
                 if task is not None:
                     raw_obs["task"] = task
+                if self._reset_rtc:
+                    raw_obs["__reset_rtc__"] = True
+                    self._reset_rtc = False
 
                 timed_obs = TimedObservation(
                     timestamp=time.time(),
