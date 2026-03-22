@@ -31,8 +31,8 @@ from lerobot.utils.transition import Transition
 # FIX for protobuf: Assign the enum to a variable and ignore the type error once
 TransferState = services_pb2.TransferState  # type: ignore[attr-defined]
 
-CHUNK_SIZE = 2 * 1024 * 1024  # 2 MB
-MAX_MESSAGE_SIZE = 4 * 1024 * 1024  # 4 MB
+CHUNK_SIZE = 8 * 1024 * 1024  # 8 MB - send 3.6MB observation in one chunk
+MAX_MESSAGE_SIZE = 16 * 1024 * 1024  # 16 MB
 
 
 def bytes_buffer_size(buffer: io.BytesIO) -> int:

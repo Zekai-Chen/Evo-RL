@@ -24,9 +24,9 @@ export REMOTE_POLICY_DEVICE="cuda"
 export REMOTE_ACTIONS_PER_CHUNK=30
 
 POLICY_REPO="Zekai-Chen/pi05_fold_towel"
-DATASET_REPO="Zekai-Chen/eval_bi_so101_rollout_4cam"
+DATASET_REPO="Zekai-Chen/eval_bi_so101_rollout_4cam_v2"
 TASK="Fold the towel"
-FPS=20
+FPS=30
 EPISODE_TIME=180
 RESET_TIME=30
 NUM_EPISODES=10
