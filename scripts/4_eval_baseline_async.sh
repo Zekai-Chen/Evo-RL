@@ -14,7 +14,7 @@ POLICY_REPO="Zekai-Chen/pi05_fold_towel"
 TASK="Fold the towel"
 SERVER=${1:-"192.168.1.73:8080"}
 FPS=30
-ACTIONS_PER_CHUNK=50
+ACTIONS_PER_CHUNK=30
 
 echo "=== Evo-RL Async Inference + RTC ==="
 echo "Server:   ${SERVER}"

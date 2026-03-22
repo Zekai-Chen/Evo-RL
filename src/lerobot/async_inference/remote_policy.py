@@ -69,7 +69,7 @@ class RemotePolicy:
         self._latency_tracker = LatencyTracker()
 
         # Reference: action_queue_size_to_get_new_actions should be > execution_horizon + inference_delay
-        self._refill_threshold = 30
+        self._refill_threshold = 10
 
         # Threading
         self._lock = threading.Lock()
