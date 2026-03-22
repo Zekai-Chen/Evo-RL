@@ -94,9 +94,7 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
 
         # RTC state
         self.rtc_config = config.rtc_config
-        self.rtc_prev_chunk: torch.Tensor | None = None
         self.rtc_latency_tracker = LatencyTracker()
-        self.rtc_last_inference_time: float = 0.0
 
     @property
     def running(self):
@@ -192,7 +190,6 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
         if self.rtc_config is not None and self.rtc_config.enabled:
             self.policy.config.rtc_config = self.rtc_config
             self.policy.init_rtc_processor()
-            self.rtc_prev_chunk = None
             self.logger.info(
                 f"RTC enabled: execution_horizon={self.rtc_config.execution_horizon}, "
                 f"max_guidance_weight={self.rtc_config.max_guidance_weight}"
@@ -267,7 +264,11 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
             inference_time = time.perf_counter() - start_time
 
             start_time = time.perf_counter()
-            actions_bytes = pickle.dumps(action_chunk)  # nosec
+            # action_chunk is already pickle bytes (dict with original + postprocessed)
+            if isinstance(action_chunk, bytes):
+                actions_bytes = action_chunk
+            else:
+                actions_bytes = pickle.dumps(action_chunk)  # nosec
             serialize_time = time.perf_counter() - start_time
 
             # Create and return the action chunk
@@ -353,25 +354,23 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
             for i, action in enumerate(action_chunk)
         ]
 
-    def _get_action_chunk(self, observation: dict[str, torch.Tensor]) -> torch.Tensor:
-        """Get an action chunk from the policy, with optional RTC."""
+    def _get_action_chunk(self, observation: dict[str, torch.Tensor],
+                          prev_chunk_left_over: torch.Tensor | None = None,
+                          inference_delay: int = 0) -> torch.Tensor:
+        """Get an action chunk from the policy, with optional RTC.
+
+        RTC prev_chunk_left_over comes from the CLIENT's ActionQueue (original/normalized
+        actions that haven't been consumed yet). This follows the reference implementation
+        in eval_with_real_robot.py.
+        """
         rtc_kwargs = {}
         if self.rtc_config is not None and self.rtc_config.enabled:
-            time_per_step = 1.0 / self.config.fps
-            inference_latency = self.rtc_latency_tracker.max()
-            inference_delay = math.ceil(inference_latency / time_per_step) if inference_latency > 0 else 0
             rtc_kwargs["inference_delay"] = inference_delay
-            rtc_kwargs["prev_chunk_left_over"] = self.rtc_prev_chunk
+            rtc_kwargs["prev_chunk_left_over"] = prev_chunk_left_over
 
         chunk = self.policy.predict_action_chunk(observation, **rtc_kwargs)
         if chunk.ndim != 3:
             chunk = chunk.unsqueeze(0)
-
-        # Store leftover actions for next RTC call (skip consumed actions estimated by inference_delay)
-        if self.rtc_config is not None and self.rtc_config.enabled:
-            delay = rtc_kwargs.get("inference_delay", 0)
-            full_chunk = chunk.squeeze(0).clone()
-            self.rtc_prev_chunk = full_chunk[delay:] if delay < len(full_chunk) else None
 
         return chunk[:, : self.actions_per_chunk, :]
 
@@ -388,6 +387,17 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
         """1. Prepare observation"""
         start_prepare = time.perf_counter()
         raw_obs = observation_t.get_observation()
+
+        # Check if client requests RTC reset (after intervention or episode change)
+        if raw_obs.pop("__reset_rtc__", False):
+            self.rtc_latency_tracker.reset()
+            self.logger.info("RTC state reset (intervention release or new episode)")
+
+        # Extract client's RTC prev_chunk_left_over (original/normalized actions)
+        client_prev_chunk = None
+        client_prev_np = raw_obs.pop("__rtc_prev_chunk_left_over__", None)
+        if client_prev_np is not None:
+            client_prev_chunk = torch.from_numpy(client_prev_np).to(self.device)
 
         # Decompress JPEG-encoded images from client
         import cv2
@@ -413,7 +423,18 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
 
         """3. Get action chunk"""
         start_inference = time.perf_counter()
-        action_tensor = self._get_action_chunk(observation)
+        # Compute inference_delay from latency tracker
+        inference_delay = 0
+        if self.rtc_config is not None and self.rtc_config.enabled:
+            time_per_step = 1.0 / self.config.fps
+            inference_latency = self.rtc_latency_tracker.max()
+            inference_delay = math.ceil(inference_latency / time_per_step) if inference_latency > 0 else 0
+
+        action_tensor = self._get_action_chunk(
+            observation,
+            prev_chunk_left_over=client_prev_chunk,
+            inference_delay=inference_delay,
+        )
         inference_time = time.perf_counter() - start_inference
 
         # Track latency for RTC inference_delay calculation
@@ -424,31 +445,30 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
             f"Preprocessing and inference took {inference_time:.4f}s, action shape: {action_tensor.shape}"
         )
 
+        # Store ORIGINAL (pre-postprocessing) actions for client's ActionQueue
+        original_actions = action_tensor.squeeze(0).detach().cpu()
+
         """4. Apply postprocessor"""
-        # Apply postprocessor (handles unnormalization and device movement)
-        # Postprocessor expects (B, action_dim) per action, but we have (B, chunk_size, action_dim)
-        # So we process each action in the chunk individually
         start_postprocess = time.perf_counter()
         _, chunk_size, _ = action_tensor.shape
 
-        # Process each action in the chunk
         processed_actions = []
         for i in range(chunk_size):
-            # Extract action at timestep i: (B, action_dim)
             single_action = action_tensor[:, i, :]
             processed_action = self.postprocessor(single_action)
             processed_actions.append(processed_action)
 
-        # Stack back to (B, chunk_size, action_dim), then remove batch dim
         action_tensor = torch.stack(processed_actions, dim=1).squeeze(0)
-        self.logger.debug(f"Postprocessed action shape: {action_tensor.shape}")
-
         action_tensor = action_tensor.detach().cpu()
 
-        """5. Convert to TimedAction list"""
-        action_chunk = self._time_action_chunk(
-            observation_t.get_timestamp(), list(action_tensor), observation_t.get_timestep()
-        )
+        """5. Return both original and postprocessed"""
+        # Return as dict so client can store them separately in ActionQueue
+        result = {
+            "original": original_actions.numpy(),
+            "postprocessed": action_tensor.numpy(),
+        }
+        result_bytes = pickle.dumps(result)
+        action_chunk = result_bytes  # Will be handled specially in GetActions
         postprocess_stops = time.perf_counter()
         postprocessing_time = postprocess_stops - start_postprocess
 
@@ -493,56 +513,6 @@ def serve(cfg: PolicyServerConfig):
 
     policy_server.logger.info(f"PolicyServer started on {cfg.host}:{cfg.port}")
     server.start()
-
-    # Start TCP observation listener (bypasses gRPC for fast 3.6MB transfer)
-    TCP_OBS_PORT = 9090
-
-    def tcp_obs_listener():
-        """Accept TCP connections and feed observations into the server's queue."""
-        import socket
-        import struct
-
-        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        srv.bind((cfg.host, TCP_OBS_PORT))
-        srv.listen(1)
-        policy_server.logger.info(f"TCP observation listener on {cfg.host}:{TCP_OBS_PORT}")
-
-        while True:
-            conn, addr = srv.accept()
-            policy_server.logger.info(f"TCP client connected from {addr}")
-            try:
-                while True:
-                    # Read 4-byte length header
-                    header = b""
-                    while len(header) < 4:
-                        chunk = conn.recv(4 - len(header))
-                        if not chunk:
-                            raise ConnectionError("Client disconnected")
-                        header += chunk
-                    msg_len = struct.unpack(">I", header)[0]
-
-                    # Read payload
-                    buf = bytearray(msg_len)
-                    view = memoryview(buf)
-                    received = 0
-                    while received < msg_len:
-                        n = conn.recv_into(view[received:], msg_len - received)
-                        if not n:
-                            raise ConnectionError("Client disconnected")
-                        received += n
-
-                    # Deserialize and enqueue
-                    timed_obs = pickle.loads(bytes(buf))
-                    policy_server._enqueue_observation(timed_obs)
-
-            except (ConnectionError, OSError) as e:
-                policy_server.logger.info(f"TCP client disconnected: {e}")
-            finally:
-                conn.close()
-
-    tcp_thread = threading.Thread(target=tcp_obs_listener, daemon=True, name="TCP-ObsListener")
-    tcp_thread.start()
 
     server.wait_for_termination()
 
