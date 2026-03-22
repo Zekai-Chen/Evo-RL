@@ -12,7 +12,9 @@ import threading
 import time
 from dataclasses import dataclass, field
 
+import cv2
 import grpc
+import numpy as np
 import torch
 
 from lerobot.policies.rtc.action_queue import ActionQueue
@@ -204,8 +206,14 @@ class RemotePolicy:
                 prev_actions = self._action_queue.get_left_over()
                 action_index_before = self._action_queue.get_action_index()
 
-                # Build observation for server
-                raw_obs = dict(obs)
+                # Build observation for server, JPEG-compress images
+                raw_obs = {}
+                for k, v in obs.items():
+                    if isinstance(v, np.ndarray) and v.ndim == 3 and v.shape[2] == 3:
+                        _, enc = cv2.imencode('.jpg', v, [cv2.IMWRITE_JPEG_QUALITY, 95])
+                        raw_obs[k] = ("__jpeg__", enc.tobytes())
+                    else:
+                        raw_obs[k] = v
                 if task is not None:
                     raw_obs["task"] = task
 
