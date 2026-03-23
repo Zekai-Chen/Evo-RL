@@ -483,6 +483,51 @@ def serve(cfg: PolicyServerConfig):
     policy_server.logger.info(f"PolicyServer started on {cfg.host}:{cfg.port}")
     server.start()
 
+    # TCP observation listener (fast 3.6MB transfer, bypasses gRPC)
+    import socket
+    import struct
+
+    TCP_OBS_PORT = 9090
+
+    def tcp_obs_listener():
+        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        srv.bind((cfg.host, TCP_OBS_PORT))
+        srv.listen(1)
+        policy_server.logger.info(f"TCP observation listener on {cfg.host}:{TCP_OBS_PORT}")
+
+        while True:
+            conn, addr = srv.accept()
+            policy_server.logger.info(f"TCP client connected from {addr}")
+            try:
+                while True:
+                    header = b""
+                    while len(header) < 4:
+                        chunk = conn.recv(4 - len(header))
+                        if not chunk:
+                            raise ConnectionError("Client disconnected")
+                        header += chunk
+                    msg_len = struct.unpack(">I", header)[0]
+
+                    buf = bytearray(msg_len)
+                    view = memoryview(buf)
+                    received = 0
+                    while received < msg_len:
+                        n = conn.recv_into(view[received:], msg_len - received)
+                        if not n:
+                            raise ConnectionError("Client disconnected")
+                        received += n
+
+                    timed_obs = pickle.loads(bytes(buf))
+                    policy_server._enqueue_observation(timed_obs)
+            except (ConnectionError, OSError) as e:
+                policy_server.logger.info(f"TCP client disconnected: {e}")
+            finally:
+                conn.close()
+
+    tcp_thread = threading.Thread(target=tcp_obs_listener, daemon=True)
+    tcp_thread.start()
+
     server.wait_for_termination()
 
     policy_server.logger.info("Server terminated")
